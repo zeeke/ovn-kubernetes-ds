@@ -108,8 +108,8 @@ var protos = []v1.Protocol{
 // - services with InternalTrafficPolicy=Local
 //
 // Template LBs will be created for
-// - services with NodePort set but *without* ExternalTrafficPolicy=Local or
-//   affinity timeout set.
+//   - services with NodePort set but *without* ExternalTrafficPolicy=Local or
+//     affinity timeout set.
 func buildServiceLBConfigs(service *v1.Service, endpointSlices []*discovery.EndpointSlice, useLBGroup, useTemplates bool) (perNodeConfigs, templateConfigs, clusterConfigs []lbConfig) {
 	needsAffinityTimeout := hasSessionAffinityTimeOut(service)
 
