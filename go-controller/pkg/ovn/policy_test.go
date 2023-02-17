@@ -28,11 +28,13 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	kapi "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	knet "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachinerytypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/watch"
 	utilnet "k8s.io/utils/net"
 	utilpointer "k8s.io/utils/pointer"
 )
@@ -2644,6 +2646,99 @@ var _ = ginkgo.Describe("OVN NetworkPolicy Operations", func() {
 					Name: "node1",
 				})
 				gomega.Eventually(fakeOvn.nbClient).Should(libovsdb.HaveData(expectedData...))
+
+				return nil
+			}
+
+			err := app.Run([]string{app.Name})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		})
+
+		ginkgo.FIt("reconciles a completed and deleted pod whose IP has been assigned to a running pod", func() {
+			watch.DefaultChanSize = 300
+			app.Action = func(ctx *cli.Context) error {
+				namespace1 := *newNamespace(namespaceName1)
+				nodeName := "node1"
+
+				// Use simple allow-same-namespace network policy
+				networkPolicy := newNetworkPolicy("networkpolicy1", namespace1.Name,
+					metav1.LabelSelector{},
+					[]knet.NetworkPolicyIngressRule{{
+						From: []knet.NetworkPolicyPeer{{
+							PodSelector: &metav1.LabelSelector{},
+						}},
+					}},
+					[]knet.NetworkPolicyEgressRule{})
+
+				fakeOvn.startWithDBSetup(initialDB,
+					&v1.NamespaceList{
+						Items: []v1.Namespace{
+							namespace1,
+						},
+					},
+					&v1.PodList{
+						Items: []v1.Pod{},
+					},
+					&knet.NetworkPolicyList{
+						Items: []knet.NetworkPolicy{
+							*networkPolicy,
+						},
+					},
+				)
+
+				fakeOvn.controller.lsManager.AddNode(
+					nodeName,
+					getLogicalSwitchUUID(fakeOvn.controller.nbClient, nodeName),
+					[]*net.IPNet{ovntest.MustParseIPNet("10.128.1.0/29")})
+
+				fakeOvn.controller.WatchNamespaces()
+				fakeOvn.controller.WatchPods()
+				fakeOvn.controller.WatchNetworkPolicy()
+
+				ginkgo.By("111")
+
+				// Run job like pods to use all the IPs in the pool (10.128.1.3 -> 10.128.1.7)
+				completedPods := make([]*kapi.Pod, 0)
+				for i := 3; i < 7; i++ {
+					//completedPod := newPod(jobPod.namespace, jobPod.podName, jobPod.nodeName, "")
+					completedPod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(namespace1.Name).
+						Create(
+							context.TODO(),
+							newPod(namespace1.Name, fmt.Sprintf("pod-%d", +i), nodeName, fmt.Sprintf("10.128.1.%d", i)),
+							metav1.CreateOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+					eventuallyExpectAddressSetsWithIP(fakeOvn, networkPolicy, fmt.Sprintf("10.128.1.%d", i))
+
+					completedPod.Status.Phase = kapi.PodSucceeded
+					completedPod, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(completedPod.Namespace).Update(context.TODO(), completedPod, metav1.UpdateOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+					eventuallyExpectEmptyAddressSetsExist(fakeOvn, networkPolicy)
+
+					completedPods = append(completedPods, completedPod)
+				}
+
+				eventuallyExpectEmptyAddressSetsExist(fakeOvn, networkPolicy)
+
+				_, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(namespace1.Name).
+					Create(
+						context.TODO(),
+						newPod(namespace1.Name, "other-pod", nodeName, "10.128.1.3"),
+						metav1.CreateOptions{})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+				ginkgo.By("222")
+				eventuallyExpectAddressSetsWithIP(fakeOvn, networkPolicy, "10.128.1.3")
+
+				// Simulate garbage collector: deletes all completed pods
+				for _, p := range completedPods {
+					err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(p.Namespace).Delete(context.TODO(), p.Name, *metav1.NewDeleteOptions(0))
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				}
+
+				// Running pod policy should not be affected by pod deletions
+				eventuallyExpectAddressSetsWithIP(fakeOvn, networkPolicy, "10.128.1.3")
 
 				return nil
 			}
