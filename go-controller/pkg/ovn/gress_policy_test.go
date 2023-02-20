@@ -1,9 +1,13 @@
 package ovn
 
 import (
+	"testing"
+
+	"github.com/onsi/ginkgo"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
 	"github.com/stretchr/testify/assert"
 	knet "k8s.io/api/networking/v1"
-	"testing"
 )
 
 func TestGetMatchFromIPBlock(t *testing.T) {
@@ -166,3 +170,36 @@ func TestGetL4Match(t *testing.T) {
 		assert.Equal(t, tc.expected, l4Match)
 	}
 }
+
+var _ = ginkgo.Describe("gressPolicy", func() {
+
+	var previousIPV4Mode bool
+
+	ginkgo.BeforeEach(func() {
+		previousIPV4Mode = config.IPv4Mode
+		config.IPv4Mode = true
+	})
+
+	ginkgo.AfterEach(func() {
+		config.IPv4Mode = previousIPV4Mode
+	})
+
+	ginkgo.It("should manage deletiong of the same IP address from non owning Pod", func() {
+		asFactory := addressset.NewFakeAddressSetFactory()
+		gp := newGressPolicy(knet.PolicyTypeIngress, 0, "ns1", "pol1")
+		gp.ensurePeerAddressSet(asFactory)
+
+		p1 := newPod("ns1", "pod1", "node1", "10.10.10.10")
+		p2 := newPod("ns1", "pod2", "node1", "10.10.10.10")
+
+		gp.addPeerPods(p2)
+		gp.addPeerPods(p1)
+		asFactory.EventuallyExpectAddressSetWithIPs("ns1.pol1.ingress.0", []string{"10.10.10.10"})
+
+		gp.deletePeerPod(p2)
+		asFactory.EventuallyExpectAddressSetWithIPs("ns1.pol1.ingress.0", []string{"10.10.10.10"})
+
+		gp.deletePeerPod(p1)
+		asFactory.EventuallyExpectEmptyAddressSetExist("ns1.pol1.ingress.0")
+	})
+})

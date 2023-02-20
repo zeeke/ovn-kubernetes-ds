@@ -3,6 +3,7 @@ package ovn
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -12,12 +13,14 @@ import (
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
 	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/gateway"
+	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
 
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
 	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
 
 	v1 "k8s.io/api/core/v1"
 	knet "k8s.io/api/networking/v1"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
@@ -43,6 +46,12 @@ type gressPolicy struct {
 	portPolicies []*portPolicy
 
 	ipBlock []*knet.IPBlock
+
+	// ipToPodOwnership stores the Pod who owns the IP address. It can happen
+	// that a running pod has the same IP address of a Succeeded/Failed pod. When
+	// that pod gets deleted, gressPolicy should not remove the colliding ip from
+	// the related Address_Set, as the IP is "owned" by someone else.
+	ipToPodOwnership *syncmap.SyncMap[apitypes.UID]
 }
 
 type portPolicy struct {
@@ -81,6 +90,7 @@ func newGressPolicy(policyType knet.PolicyType, idx int, namespace, name string)
 		peerV4AddressSets: sets.String{},
 		peerV6AddressSets: sets.String{},
 		portPolicies:      make([]*portPolicy, 0),
+		ipToPodOwnership:  syncmap.NewSyncMap[apitypes.UID](),
 	}
 }
 
@@ -143,13 +153,35 @@ func (gp *gressPolicy) addPeerPods(pods ...*v1.Pod) error {
 	if config.IPv4Mode && config.IPv6Mode {
 		podIPFactor = 2
 	}
+
+	uniqueIpToPod := make(map[string]apitypes.UID)
 	ips := make([]net.IP, 0, len(pods)*podIPFactor)
 	for _, pod := range pods {
 		podIPs, err := util.GetAllPodIPs(pod)
 		if err != nil {
 			return err
 		}
+
 		ips = append(ips, podIPs...)
+		for _, podIP := range podIPs {
+			uniqueIpToPod[podIP.String()] = pod.UID
+		}
+	}
+
+	// Sorting to be sure the same lock sequence is done also in `deletePeerPod`
+	uniqueIps := make([]string, 0, len(uniqueIpToPod))
+	for k := range uniqueIpToPod {
+		uniqueIps = append(uniqueIps, k)
+	}
+
+	sort.Slice(uniqueIps, func(i, j int) bool { return uniqueIps[i] < uniqueIps[j] })
+
+	// Avoid lock the same IP multiple times, as it would produce a deadlock.
+	for _, ip := range uniqueIps {
+		gp.ipToPodOwnership.LockKey(ip)
+		defer gp.ipToPodOwnership.UnlockKey(ip)
+
+		gp.ipToPodOwnership.Store(ip, uniqueIpToPod[ip])
 	}
 
 	return gp.peerAddressSet.AddIPs(ips)
@@ -160,7 +192,29 @@ func (gp *gressPolicy) deletePeerPod(pod *v1.Pod) error {
 	if err != nil {
 		return err
 	}
-	return gp.peerAddressSet.DeleteIPs(ips)
+
+	// Sorting to be sure the same lock sequence is done also in `addPeerPods`
+	sort.Slice(ips, func(i, j int) bool { return ips[i].String() < ips[j].String() })
+
+	toDeleteIPs := make([]net.IP, len(ips))
+	for _, podIP := range ips {
+		gp.ipToPodOwnership.LockKey(podIP.String())
+		defer gp.ipToPodOwnership.UnlockKey(podIP.String())
+
+		ownerPodUID, ok := gp.ipToPodOwnership.Load(podIP.String())
+		if !ok {
+			klog.Warningf("Pod IP [%s] is not associated to any Pod", podIP)
+			continue
+		}
+
+		if ownerPodUID != pod.UID {
+			klog.Warningf("Pod IP [%s] is not associated to pod is being deleted [%s/%s]", podIP, pod.Namespace, pod.Name)
+			continue
+		}
+
+		toDeleteIPs = append(toDeleteIPs, podIP)
+	}
+	return gp.peerAddressSet.DeleteIPs(toDeleteIPs)
 }
 
 // If the port is not specified, it implies all ports for that protocol
