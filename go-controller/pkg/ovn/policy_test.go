@@ -1363,7 +1363,7 @@ var _ = ginkgo.Describe("OVN NetworkPolicy Operations", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		})
 
-		ginkgo.It("reconciles a completed and deleted pod whose IP has been assigned to a running pod", func() {
+		ginkgo.FIt("reconciles a completed and deleted pod whose IP has been assigned to a running pod", func() {
 			app.Action = func(ctx *cli.Context) error {
 				namespace1 := *newNamespace(namespaceName1)
 				nodeName := "node1"

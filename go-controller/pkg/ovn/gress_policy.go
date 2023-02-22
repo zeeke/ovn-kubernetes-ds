@@ -51,7 +51,7 @@ type gressPolicy struct {
 	// that a running pod has the same IP address of a Succeeded/Failed pod. When
 	// that pod gets deleted, gressPolicy should not remove the colliding ip from
 	// the related Address_Set, as the IP is "owned" by someone else.
-	ipToPodOwnership *syncmap.SyncMap[apitypes.UID]
+	ipToPodOwnership *syncmap.SyncMap
 }
 
 type portPolicy struct {
@@ -90,7 +90,7 @@ func newGressPolicy(policyType knet.PolicyType, idx int, namespace, name string)
 		peerV4AddressSets: sets.String{},
 		peerV6AddressSets: sets.String{},
 		portPolicies:      make([]*portPolicy, 0),
-		ipToPodOwnership:  syncmap.NewSyncMap[apitypes.UID](),
+		ipToPodOwnership:  syncmap.NewSyncMap(),
 	}
 }
 
@@ -181,7 +181,7 @@ func (gp *gressPolicy) addPeerPods(pods ...*v1.Pod) error {
 		gp.ipToPodOwnership.LockKey(ip)
 		defer gp.ipToPodOwnership.UnlockKey(ip)
 
-		gp.ipToPodOwnership.Store(ip, uniqueIpToPod[ip])
+		gp.ipToPodOwnership.Store(ip, string(uniqueIpToPod[ip]))
 	}
 
 	return gp.peerAddressSet.AddIPs(ips)
@@ -207,7 +207,7 @@ func (gp *gressPolicy) deletePeerPod(pod *v1.Pod) error {
 			continue
 		}
 
-		if ownerPodUID != pod.UID {
+		if ownerPodUID != string(pod.UID) {
 			klog.Warningf("Pod IP [%s] is not associated to pod is being deleted [%s/%s]", podIP, pod.Namespace, pod.Name)
 			continue
 		}
