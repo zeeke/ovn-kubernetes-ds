@@ -611,7 +611,7 @@ func getGatewayIPTRules(service *kapi.Service, localEndpoints []string, svcHasLo
 				if svcTypeIsETPLocal && !svcHasLocalHostNetEndPnt {
 					// case1 (see function description for details)
 					// A DNAT rule to masqueradeIP is added that takes priority over DNAT to clusterIP.
-					rules = append(rules, getNodePortIPTRules(svcPort, clusterIP, svcPort.NodePort, svcHasLocalHostNetEndPnt, svcTypeIsETPLocal)...)
+					//rules = append(rules, getNodePortIPTRules(svcPort, clusterIP, svcPort.NodePort, svcHasLocalHostNetEndPnt, svcTypeIsETPLocal)...)
 					// add a skip SNAT rule to OVN-KUBE-SNAT-MGMTPORT to preserve sourceIP for etp=local traffic.
 					rules = append(rules, getNodePortETPLocalIPTRules(svcPort, clusterIP)...)
 				}
